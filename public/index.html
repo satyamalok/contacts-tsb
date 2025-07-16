@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Contact Manager</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <h1>Contact Manager</h1>
+
+  <form id="contact-form">
+    <input type="text" id="client_name" placeholder="Clients Name" required />
+    <input type="text" id="agent_name" placeholder="Agents Name" />
+    <input type="text" id="phone1" placeholder="Phone 1" required maxlength="10" />
+    <input type="text" id="phone2" placeholder="Phone 2" maxlength="10" />
+    <input type="text" id="phone3" placeholder="Phone 3" maxlength="10" />
+    <input type="text" id="state" placeholder="State" />
+    <button type="submit">Add Contact</button>
+  </form>
+
+  <input type="text" id="search" placeholder="Search by name or phone..." />
+
+  <table>
+    <thead>
+      <tr>
+        <th>Client</th>
+        <th>Agent</th>
+        <th>Phone1</th>
+        <th>Phone2</th>
+        <th>Phone3</th>
+        <th>State</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="contact-table-body">
+      <!-- Rows will be added here -->
+    </tbody>
+  </table>
+
+  <script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,48 @@
+body {
+  font-family: sans-serif;
+  margin: 20px;
+  background: #f4f4f4;
+}
+
+h1 {
+  color: #333;
+}
+
+form, table {
+  margin-bottom: 20px;
+}
+
+form input {
+  padding: 8px;
+  margin: 5px;
+}
+
+form button {
+  padding: 8px 16px;
+  background: #1205d2;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+form button:hover {
+  background: #0056b3;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+table th, table td {
+  padding: 10px;
+  border: 1px solid #ddd;
+  text-align: left;
+}
+
+#search {
+  padding: 10px;
+  width: 100%;
+  margin-bottom: 10px;
+}
