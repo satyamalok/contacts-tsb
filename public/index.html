@@ -7,39 +7,40 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <h1>Contact Manager</h1>
+  <div class="container">
+    <h1>📱 Contact Manager</h1>
 
-  <form id="contact-form">
-    <input type="text" id="client_name" placeholder="Clients Name" required />
-    <input type="text" id="agent_name" placeholder="Agents Name" />
-    <input type="text" id="phone1" placeholder="Phone 1" required maxlength="10" />
-    <input type="text" id="phone2" placeholder="Phone 2" maxlength="10" />
-    <input type="text" id="phone3" placeholder="Phone 3" maxlength="10" />
-    <input type="text" id="state" placeholder="State" />
-    <button type="submit">Add Contact</button>
-  </form>
+    <form id="contact-form">
+      <input type="text" id="client_name" placeholder="Client's Name" required />
+      <input type="text" id="agent_name" placeholder="Agent's Name" />
+      <input type="text" id="phone1" placeholder="Phone 1" required maxlength="10" />
+      <input type="text" id="phone2" placeholder="Phone 2" maxlength="10" />
+      <input type="text" id="phone3" placeholder="Phone 3" maxlength="10" />
+      <input type="text" id="state" placeholder="State" />
+      <button type="submit">Add Contact</button>
+    </form>
 
-  <input type="text" id="search" placeholder="Search by name or phone..." />
+    <input type="text" id="search" placeholder="🔍 Search by name or phone..." />
 
-  <table>
-    <thead>
-      <tr>
-        <th>Client</th>
-        <th>Agent</th>
-        <th>Phone1</th>
-        <th>Phone2</th>
-        <th>Phone3</th>
-        <th>State</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="contact-table-body">
-      <!-- Rows will be added here -->
-    </tbody>
-  </table>
+    <table>
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th>Agent</th>
+          <th>Phone 1</th>
+          <th>Phone 2</th>
+          <th>Phone 3</th>
+          <th>State</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="contact-table-body">
+        <!-- Rows will be added here -->
+      </tbody>
+    </table>
+  </div>
 
   <script src="/socket.io/socket.io.js"></script>
-<script src="app.js"></script>
-
+  <script src="app.js"></script>
 </body>
 </html>

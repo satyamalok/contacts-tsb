@@ -1,7 +1,75 @@
-// controllers/contactController.js - Updated version
+// controllers/contactController.js - Phase 2 Enhanced
 
 const pool = require('../db');
 const { v4: uuidv4 } = require('uuid');
+
+// Message queue functions
+const queueMessageForDevice = async (deviceId, eventType, eventData) => {
+  try {
+    const result = await pool.query(
+      `INSERT INTO message_queue (device_id, event_type, event_data, message_uuid)
+       VALUES ($1, $2, $3, $4) RETURNING id, message_uuid`,
+      [deviceId, eventType, JSON.stringify(eventData), uuidv4()]
+    );
+    
+    // Update pending message count
+    await pool.query(
+      `INSERT INTO device_sync_status (device_id, pending_messages)
+       VALUES ($1, 1)
+       ON CONFLICT (device_id)
+       DO UPDATE SET pending_messages = device_sync_status.pending_messages + 1`,
+      [deviceId]
+    );
+    
+    return result.rows[0];
+  } catch (error) {
+    console.error('Error queuing message:', error);
+  }
+};
+
+const getConnectedDevices = (io) => {
+  if (!io || !io.sockets) {
+    return [];
+  }
+  
+  const connectedSockets = io.sockets.sockets;
+  const connectedDeviceIds = [];
+  
+  connectedSockets.forEach((socket) => {
+    if (socket.device_id) {
+      connectedDeviceIds.push(socket.device_id);
+    }
+  });
+  
+  return connectedDeviceIds;
+};
+
+const broadcastToOnlineDevices = async (eventType, eventData, excludeDeviceId = null, io = null) => {
+  try {
+    if (!io) {
+      console.log('No io instance available for broadcasting');
+      return;
+    }
+    
+    const connectedDevices = getConnectedDevices(io);
+    const allDevicesResult = await pool.query('SELECT id FROM devices');
+    const allDevices = allDevicesResult.rows.map(row => row.id);
+    
+    for (const deviceId of allDevices) {
+      if (deviceId === excludeDeviceId) continue;
+      
+      if (connectedDevices.includes(deviceId)) {
+        // Device is online - send directly with GENERIC event names
+        io.emit(eventType, eventData);  // ✅ Use generic event names
+      } else {
+        // Device is offline - queue the message
+        await queueMessageForDevice(deviceId, eventType, eventData);
+      }
+    }
+  } catch (error) {
+    console.error('Error broadcasting to devices:', error);
+  }
+};
 
 // Device management functions
 const updateDeviceLastSeen = async (deviceId, deviceInfo = {}) => {
@@ -12,6 +80,15 @@ const updateDeviceLastSeen = async (deviceId, deviceInfo = {}) => {
        ON CONFLICT (id) 
        DO UPDATE SET last_seen = NOW(), status = 'online'`,
       [deviceId, deviceInfo.name || 'Unknown', deviceInfo.type || 'web']
+    );
+    
+    // Update sync status
+    await pool.query(
+      `INSERT INTO device_sync_status (device_id, last_online)
+       VALUES ($1, NOW())
+       ON CONFLICT (device_id)
+       DO UPDATE SET last_online = NOW()`,
+      [deviceId]
     );
   } catch (error) {
     console.error('Error updating device last seen:', error);
@@ -101,14 +178,20 @@ exports.checkDuplicate = async (req, res) => {
   }
 };
 
-// GET /contacts/sync/delta/:device_id - New delta sync endpoint
+// GET /contacts/sync/delta/:device_id - Enhanced delta sync
 exports.getDeltaSync = async (req, res) => {
   const { device_id } = req.params;
-  const { since } = req.query;
+  const { since, batch_size = 100 } = req.query;
 
   try {
     // Update device last seen
     await updateDeviceLastSeen(device_id);
+
+    // Mark sync in progress
+    await pool.query(
+      `UPDATE device_sync_status SET sync_in_progress = true WHERE device_id = $1`,
+      [device_id]
+    );
 
     // Get device's last sync timestamp if 'since' not provided
     let sinceTimestamp = since;
@@ -120,19 +203,30 @@ exports.getDeltaSync = async (req, res) => {
       sinceTimestamp = deviceResult.rows[0]?.last_sync_timestamp || '1970-01-01';
     }
 
-    // Get modified contacts
+    // Get modified contacts with pagination
     const contactsResult = await pool.query(
       `SELECT * FROM contacts 
        WHERE last_modified > $1 
-       ORDER BY last_modified ASC`,
-      [sinceTimestamp]
+       ORDER BY last_modified ASC
+       LIMIT $2`,
+      [sinceTimestamp, batch_size]
     );
 
     // Get deleted contacts
     const deletedResult = await pool.query(
       `SELECT id, deleted, last_modified FROM contacts 
-       WHERE deleted = true AND last_modified > $1`,
-      [sinceTimestamp]
+       WHERE deleted = true AND last_modified > $1
+       LIMIT $2`,
+      [sinceTimestamp, batch_size]
+    );
+
+    // Get queued messages for this device
+    const queuedMessages = await pool.query(
+      `SELECT id, event_type, event_data, message_uuid, created_at FROM message_queue
+       WHERE device_id = $1 AND delivered = false
+       ORDER BY created_at ASC
+       LIMIT $2`,
+      [device_id, batch_size]
     );
 
     // Update device's last sync timestamp
@@ -141,11 +235,19 @@ exports.getDeltaSync = async (req, res) => {
       [device_id]
     );
 
+    // Mark sync completed
+    await pool.query(
+      `UPDATE device_sync_status SET sync_in_progress = false WHERE device_id = $1`,
+      [device_id]
+    );
+
     res.json({
       contacts: contactsResult.rows.filter(c => !c.deleted),
       deleted: deletedResult.rows,
+      queued_messages: queuedMessages.rows,
       server_timestamp: new Date().toISOString(),
-      since: sinceTimestamp
+      since: sinceTimestamp,
+      has_more: contactsResult.rows.length === parseInt(batch_size)
     });
   } catch (error) {
     console.error('Error in delta sync:', error);
@@ -153,7 +255,74 @@ exports.getDeltaSync = async (req, res) => {
   }
 };
 
-// POST /contacts - Enhanced with better timestamp handling
+// POST /contacts/ack - Message acknowledgment endpoint
+exports.acknowledgeMessage = async (req, res) => {
+  const { device_id, message_uuids } = req.body;
+
+  try {
+    if (!Array.isArray(message_uuids)) {
+      return res.status(400).json({ error: 'message_uuids must be an array' });
+    }
+
+    // Mark messages as delivered
+    const result = await pool.query(
+      `UPDATE message_queue SET delivered = true 
+       WHERE device_id = $1 AND message_uuid = ANY($2::uuid[])
+       RETURNING id`,
+      [device_id, message_uuids]
+    );
+
+    // Update pending message count
+    await pool.query(
+      `UPDATE device_sync_status 
+       SET pending_messages = GREATEST(0, pending_messages - $1)
+       WHERE device_id = $2`,
+      [result.rows.length, device_id]
+    );
+
+    res.json({ acknowledged: result.rows.length });
+  } catch (error) {
+    console.error('Error acknowledging messages:', error);
+    res.status(500).json({ error: 'Failed to acknowledge messages' });
+  }
+};
+
+// POST /contacts/sync/reconnect - Handle device reconnection
+exports.handleReconnection = async (req, res) => {
+  const { device_id, last_seen_timestamp } = req.body;
+
+  try {
+    // Update device status
+    await updateDeviceLastSeen(device_id);
+
+    // Get pending message count
+    const syncStatus = await pool.query(
+      'SELECT pending_messages FROM device_sync_status WHERE device_id = $1',
+      [device_id]
+    );
+
+    const pendingCount = syncStatus.rows[0]?.pending_messages || 0;
+
+    // Get recent changes since last seen
+    const recentChanges = await pool.query(
+      `SELECT COUNT(*) as change_count FROM contacts
+       WHERE last_modified > $1`,
+      [last_seen_timestamp || '1970-01-01']
+    );
+
+    res.json({
+      status: 'reconnected',
+      pending_messages: pendingCount,
+      recent_changes: parseInt(recentChanges.rows[0].change_count),
+      requires_full_sync: pendingCount > 50 || recentChanges.rows[0].change_count > 100
+    });
+  } catch (error) {
+    console.error('Error handling reconnection:', error);
+    res.status(500).json({ error: 'Failed to handle reconnection' });
+  }
+};
+
+// POST /contacts - Enhanced with offline queue
 exports.createContact = async (req, res) => {
   const {
     client_name,
@@ -187,12 +356,12 @@ exports.createContact = async (req, res) => {
           [client_name, agent_name, phone2, phone3, state, date, device_id, contact.id]
         );
         
-        // Emit real-time update
+        // Broadcast to all devices with offline queue
         const io = req.app.get('io');
-        io.emit('contact-updated', {
-          ...updated.rows[0],
-          event_type: 'restored'
-        });
+await broadcastToOnlineDevices('contact-updated', {
+  ...updated.rows[0],
+  event_type: 'restored'
+}, device_id, io);
 
         return res.status(201).json(updated.rows[0]);
       } else {
@@ -208,12 +377,12 @@ exports.createContact = async (req, res) => {
       [id, client_name, agent_name, phone1, phone2, phone3, state, date, device_id]
     );
 
-    // Emit real-time update
+    // Broadcast to all devices with offline queue
     const io = req.app.get('io');
-    io.emit('contact-created', {
-      ...result.rows[0],
-      event_type: 'created'
-    });
+await broadcastToOnlineDevices('contact-created', {
+  ...result.rows[0],
+  event_type: 'created'
+}, device_id, io);
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -222,7 +391,7 @@ exports.createContact = async (req, res) => {
   }
 };
 
-// PUT /contacts/:id - Enhanced with timestamp handling
+// PUT /contacts/:id - Enhanced with offline queue
 exports.updateContact = async (req, res) => {
   const { id } = req.params;
   const {
@@ -255,12 +424,12 @@ exports.updateContact = async (req, res) => {
       return res.status(404).json({ error: 'Contact not found' });
     }
 
-    // Emit real-time update
+    // Broadcast to all devices with offline queue
     const io = req.app.get('io');
-    io.emit('contact-updated', {
-      ...result.rows[0],
-      event_type: 'updated'
-    });
+await broadcastToOnlineDevices('contact-updated', {
+  ...result.rows[0],
+  event_type: 'updated'
+}, device_id, io);
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -269,7 +438,7 @@ exports.updateContact = async (req, res) => {
   }
 };
 
-// DELETE /contacts/:id - Enhanced with timestamp handling
+// DELETE /contacts/:id - Enhanced with offline queue
 exports.deleteContact = async (req, res) => {
   const { id } = req.params;
   const { device_id } = req.body;
@@ -289,13 +458,13 @@ exports.deleteContact = async (req, res) => {
       return res.status(404).json({ error: 'Contact not found' });
     }
 
-    // Emit real-time update
+    // Broadcast to all devices with offline queue
     const io = req.app.get('io');
-    io.emit('contact-deleted', { 
-      id,
-      event_type: 'deleted',
-      timestamp: new Date().toISOString()
-    });
+await broadcastToOnlineDevices('contact-deleted', { 
+  id,
+  event_type: 'deleted',
+  timestamp: new Date().toISOString()
+}, device_id, io);
 
     res.json({ success: true, deleted: result.rows[0] });
   } catch (error) {
@@ -400,7 +569,10 @@ exports.syncContacts = async (req, res) => {
 exports.getDevices = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM devices ORDER BY last_seen DESC'
+      `SELECT d.*, ds.pending_messages, ds.last_online, ds.sync_in_progress
+       FROM devices d
+       LEFT JOIN device_sync_status ds ON d.id = ds.device_id
+       ORDER BY d.last_seen DESC`
     );
     res.json(result.rows);
   } catch (error) {
@@ -412,13 +584,5 @@ exports.getDevices = async (req, res) => {
 // Export utility functions for WebSocket usage
 module.exports.updateDeviceLastSeen = updateDeviceLastSeen;
 module.exports.markDeviceOffline = markDeviceOffline;
-
-// Export all controller functions
-module.exports.getContacts = exports.getContacts;
-module.exports.checkDuplicate = exports.checkDuplicate;
-module.exports.createContact = exports.createContact;
-module.exports.updateContact = exports.updateContact;
-module.exports.deleteContact = exports.deleteContact;
-module.exports.syncContacts = exports.syncContacts;
-module.exports.getDeltaSync = exports.getDeltaSync;
-module.exports.getDevices = exports.getDevices;
+module.exports.queueMessageForDevice = queueMessageForDevice;
+module.exports.broadcastToOnlineDevices = broadcastToOnlineDevices;
